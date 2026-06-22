@@ -62,7 +62,7 @@ const CSS = `
   .type-selector button.active { background: var(--color-accent, #00C851); color: #000; font-weight: 700; }
   .type-selector button:not(.active):hover { background: var(--color-surface-hover, #1e2f31); color: var(--color-text, #e0e0e0); }
 
-  /* Add gallery panel */
+  /* Add/edit gallery panel */
   .add-panel {
     background: var(--color-surface, #162325);
     border: 1px solid var(--color-border, #2a3a3c);
@@ -153,10 +153,12 @@ class MetArtManager extends HTMLElement {
       departments: [],
       cacheStats: {},
       settings: null,
-      // add form
+      // add/edit form
+      editGalleryId: null,   // null = create mode, string = edit mode
       newType: 'highlights',
       newLabel: '',
       newDeptId: '',
+      newDeptName: '',
       newQ: '',
       newPublicDomain: true,
       newDateBegin: '',
@@ -211,8 +213,69 @@ class MetArtManager extends HTMLElement {
     this.render();
   }
 
+  _openAddPanel() {
+    this.setState({
+      showAddPanel: true,
+      editGalleryId: null,
+      newType: 'highlights',
+      newLabel: '',
+      newDeptId: '',
+      newDeptName: '',
+      newQ: '',
+      newPublicDomain: true,
+      newDateBegin: '',
+      newDateEnd: '',
+      newMedium: '',
+      message: null,
+    });
+  }
+
+  _openEditPanel(gallery) {
+    this.setState({
+      showAddPanel: true,
+      editGalleryId: gallery.id,
+      newType: gallery.type || 'highlights',
+      newLabel: gallery.label || '',
+      newDeptId: gallery.department_id ? String(gallery.department_id) : '',
+      newDeptName: gallery.department_name || '',
+      newQ: gallery.q || '',
+      newPublicDomain: gallery.is_public_domain !== false,
+      newDateBegin: gallery.date_begin ? String(gallery.date_begin) : '',
+      newDateEnd: gallery.date_end ? String(gallery.date_end) : '',
+      newMedium: gallery.medium || '',
+      message: null,
+    });
+    // Pre-load departments if this gallery uses them
+    if (gallery.type === 'department' || (gallery.type === 'search' && gallery.department_id)) {
+      this.loadDepartments();
+    }
+  }
+
+  _buildGalleryPayload() {
+    const { newType, newLabel, newDeptId, newDeptName, newQ, newPublicDomain, newDateBegin, newDateEnd, newMedium } = this.state;
+
+    // Resolve department name from loaded list if available
+    let deptName = newDeptName;
+    if (newDeptId && this.state.departments.length > 0) {
+      const found = this.state.departments.find(d => String(d.departmentId) === String(newDeptId));
+      if (found) deptName = found.displayName;
+    }
+
+    return {
+      label: newLabel.trim(),
+      type: newType,
+      department_id: newDeptId ? parseInt(newDeptId, 10) : null,
+      department_name: deptName || null,
+      q: newQ.trim(),
+      is_public_domain: newPublicDomain,
+      date_begin: newDateBegin ? parseInt(newDateBegin, 10) : null,
+      date_end: newDateEnd ? parseInt(newDateEnd, 10) : null,
+      medium: newMedium.trim(),
+    };
+  }
+
   async addGallery() {
-    const { newType, newLabel, newDeptId, newQ, newPublicDomain, newDateBegin, newDateEnd, newMedium } = this.state;
+    const { newType, newLabel, newDeptId, newQ } = this.state;
     const label = newLabel.trim();
     if (!label) { this.setState({ message: { type: 'error', text: 'Gallery name is required' } }); return; }
     if (newType === 'department' && !newDeptId) { this.setState({ message: { type: 'error', text: 'Select a department' } }); return; }
@@ -223,16 +286,7 @@ class MetArtManager extends HTMLElement {
       const resp = await fetch(`${this.apiBase}/galleries`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          label,
-          type: newType,
-          department_id: newDeptId ? parseInt(newDeptId, 10) : null,
-          q: newQ.trim(),
-          is_public_domain: newPublicDomain,
-          date_begin: newDateBegin ? parseInt(newDateBegin, 10) : null,
-          date_end: newDateEnd ? parseInt(newDateEnd, 10) : null,
-          medium: newMedium.trim(),
-        }),
+        body: JSON.stringify(this._buildGalleryPayload()),
       });
       if (!resp.ok) { const d = await resp.json(); throw new Error(d.detail || `HTTP ${resp.status}`); }
       const data = await resp.json();
@@ -240,13 +294,41 @@ class MetArtManager extends HTMLElement {
         saving: false,
         galleries: data.settings?.galleries || [],
         showAddPanel: false,
-        newLabel: '', newDeptId: '', newQ: '', newDateBegin: '', newDateEnd: '', newMedium: '',
-        newPublicDomain: true,
+        editGalleryId: null,
         message: { type: 'success', text: `Gallery "${label}" created — fetching artworks in background…` },
       });
       setTimeout(() => this.loadStatus(), 3000);
     } catch (err) {
       this.setState({ saving: false, message: { type: 'error', text: `Failed to create gallery: ${err.message}` } });
+    }
+  }
+
+  async saveEditGallery() {
+    const { editGalleryId, newType, newLabel, newDeptId, newQ } = this.state;
+    const label = newLabel.trim();
+    if (!label) { this.setState({ message: { type: 'error', text: 'Gallery name is required' } }); return; }
+    if (newType === 'department' && !newDeptId) { this.setState({ message: { type: 'error', text: 'Select a department' } }); return; }
+    if (newType === 'search' && !newQ.trim()) { this.setState({ message: { type: 'error', text: 'Enter a search keyword' } }); return; }
+
+    this.setState({ saving: true, message: null });
+    try {
+      const resp = await fetch(`${this.apiBase}/galleries/${encodeURIComponent(editGalleryId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this._buildGalleryPayload()),
+      });
+      if (!resp.ok) { const d = await resp.json(); throw new Error(d.detail || `HTTP ${resp.status}`); }
+      const data = await resp.json();
+      this.setState({
+        saving: false,
+        galleries: data.settings?.galleries || [],
+        showAddPanel: false,
+        editGalleryId: null,
+        message: { type: 'success', text: `Gallery "${label}" updated — refreshing artworks in background…` },
+      });
+      setTimeout(() => this.loadStatus(), 3000);
+    } catch (err) {
+      this.setState({ saving: false, message: { type: 'error', text: `Failed to save gallery: ${err.message}` } });
     }
   }
 
@@ -327,9 +409,21 @@ class MetArtManager extends HTMLElement {
 
   _galleryDescription(g) {
     const parts = [];
-    if (g.gallery_type === 'department') parts.push('Department');
-    else if (g.gallery_type === 'search') parts.push(`Search: "${g.q || ''}"`);
-    else parts.push('Highlights');
+    if (g.type === 'highlights') {
+      parts.push('Met Highlights');
+    } else if (g.type === 'department') {
+      const deptLabel = g.department_name || (g.department_id ? `Dept ${g.department_id}` : 'All Departments');
+      parts.push(deptLabel);
+    } else if (g.type === 'search') {
+      if (g.q) parts.push(`"${g.q}"`);
+      if (g.department_name) parts.push(`in ${g.department_name}`);
+      else if (g.department_id) parts.push(`in Dept ${g.department_id}`);
+    }
+    if (g.medium) parts.push(g.medium);
+    if (g.date_begin || g.date_end) {
+      parts.push(`${g.date_begin || '?'}–${g.date_end || 'present'}`);
+    }
+    if (!g.is_public_domain) parts.push('all rights');
     return parts.join(' · ');
   }
 
@@ -351,9 +445,8 @@ class MetArtManager extends HTMLElement {
       const age = this._formatAge(stat.fetched_at);
       const typeClass = g.type || 'highlights';
       const typeLabel = GALLERY_TYPES.find(t => t.id === typeClass)?.name || typeClass;
-      let meta = `${count} artworks · cached ${age}`;
-      if (g.type === 'search' && g.q) meta = `Keyword: "${this._esc(g.q)}" · ${meta}`;
-      else if (g.type === 'department' && g.department_id) meta = `Dept ID: ${g.department_id} · ${meta}`;
+      const desc = this._galleryDescription(g);
+      const meta = `${desc ? desc + ' · ' : ''}${count} artworks · cached ${age}`;
       return `
         <div class="gallery-card">
           <div class="gallery-info">
@@ -364,6 +457,7 @@ class MetArtManager extends HTMLElement {
             <div class="gallery-meta">${meta}</div>
           </div>
           <div class="gallery-actions">
+            <button class="btn btn-secondary btn-sm btn-icon" data-action="edit-gallery" data-id="${this._esc(g.id)}" title="Edit">✎</button>
             <button class="btn btn-secondary btn-sm btn-icon" data-action="refresh-gallery" data-id="${this._esc(g.id)}" title="Refresh">↻</button>
             <button class="btn btn-danger btn-sm btn-icon" data-action="delete-gallery" data-id="${this._esc(g.id)}" data-label="${this._esc(g.label)}" title="Remove">✕</button>
           </div>
@@ -372,32 +466,49 @@ class MetArtManager extends HTMLElement {
   }
 
   buildAddPanel() {
-    const { newType, newLabel, newDeptId, newQ, newPublicDomain, newDateBegin, newDateEnd, newMedium, saving, departments, loadingDepts } = this.state;
+    const {
+      editGalleryId, newType, newLabel, newDeptId, newQ, newPublicDomain,
+      newDateBegin, newDateEnd, newMedium, saving, departments, loadingDepts,
+    } = this.state;
+    const isEdit = !!editGalleryId;
 
     const deptOptions = loadingDepts
       ? `<option value="">Loading…</option>`
       : departments.length === 0
         ? `<option value="">— click to load —</option>`
-        : [`<option value="">— select department —</option>`,
+        : [`<option value="">— ${newType === 'department' ? 'select department' : 'any department'} —</option>`,
            ...departments.map(d => `<option value="${d.departmentId}" ${String(newDeptId) === String(d.departmentId) ? 'selected' : ''}>${this._esc(d.displayName)}</option>`)
           ].join('');
 
-    const typeSpecific = newType === 'department' ? `
-        <div class="field">
-          <label>Department</label>
-          <select data-field="newDeptId" data-action="load-depts-on-focus">
-            ${deptOptions}
-          </select>
-        </div>` : newType === 'search' ? `
-        <div class="field" style="min-width:200px">
-          <label>Keyword</label>
-          <input type="text" placeholder="e.g. impressionism, portrait, armor…" value="${this._esc(newQ)}" data-field="newQ" />
-        </div>` : '';
+    // Department field: required for 'department' type, optional filter for 'search'
+    const deptField = `
+      <div class="field">
+        <label>${newType === 'department' ? 'Department' : 'Department (optional filter)'}</label>
+        <select data-field="newDeptId" data-action="load-depts-on-focus">
+          ${deptOptions}
+        </select>
+      </div>`;
+
+    const searchField = `
+      <div class="field" style="min-width:200px">
+        <label>Keyword</label>
+        <input type="text" placeholder="e.g. impressionism, portrait, armor…" value="${this._esc(newQ)}" data-field="newQ" />
+      </div>`;
+
+    // Search: keyword (required) + optional department on same row
+    // Department: just department selector
+    // Highlights: nothing
+    let typeSpecificRow = '';
+    if (newType === 'search') {
+      typeSpecificRow = `<div class="input-row">${searchField}${deptField}</div>`;
+    } else if (newType === 'department') {
+      typeSpecificRow = `<div class="input-row">${deptField}</div>`;
+    }
 
     return `
       <div class="add-panel">
         <div class="add-panel-header">
-          <span class="section-title">Add Gallery</span>
+          <span class="section-title">${isEdit ? 'Edit Gallery' : 'Add Gallery'}</span>
           <button class="btn btn-ghost btn-sm" data-action="cancel-add">Cancel</button>
         </div>
         <div class="input-row">
@@ -412,7 +523,7 @@ class MetArtManager extends HTMLElement {
             </div>
           </div>
         </div>
-        ${typeSpecific ? `<div class="input-row">${typeSpecific}</div>` : ''}
+        ${typeSpecificRow}
         <div class="input-row" style="flex-wrap:wrap;gap:14px;align-items:flex-start">
           <div class="checkbox-row">
             <input type="checkbox" id="new-public-domain" ${newPublicDomain ? 'checked' : ''} data-field-check="newPublicDomain" />
@@ -435,8 +546,8 @@ class MetArtManager extends HTMLElement {
           </div>
         </div>
         <div style="display:flex;justify-content:flex-end;gap:8px">
-          <button class="btn btn-primary" data-action="add-gallery" ${saving ? 'disabled' : ''}>
-            ${saving ? '<span class="spinner"></span> Creating…' : '+ Create Gallery'}
+          <button class="btn btn-primary" data-action="submit-gallery" ${saving ? 'disabled' : ''}>
+            ${saving ? `<span class="spinner"></span> ${isEdit ? 'Saving…' : 'Creating…'}` : (isEdit ? 'Save Changes' : '+ Create Gallery')}
           </button>
         </div>
       </div>`;
@@ -528,11 +639,18 @@ class MetArtManager extends HTMLElement {
       el.addEventListener('click', async () => {
         const a = el.dataset.action;
         if (a === 'show-add') {
-          this.setState({ showAddPanel: true, message: null });
+          this._openAddPanel();
         } else if (a === 'cancel-add') {
-          this.setState({ showAddPanel: false, message: null });
-        } else if (a === 'add-gallery') {
-          await this.addGallery();
+          this.setState({ showAddPanel: false, editGalleryId: null, message: null });
+        } else if (a === 'submit-gallery') {
+          if (this.state.editGalleryId) {
+            await this.saveEditGallery();
+          } else {
+            await this.addGallery();
+          }
+        } else if (a === 'edit-gallery') {
+          const gallery = this.state.galleries.find(g => g.id === el.dataset.id);
+          if (gallery) this._openEditPanel(gallery);
         } else if (a === 'delete-gallery') {
           await this.deleteGallery(el.dataset.id, el.dataset.label);
         } else if (a === 'refresh-all') {
@@ -545,8 +663,8 @@ class MetArtManager extends HTMLElement {
           await this.saveDisplaySettings();
         } else if (a === 'set-type') {
           const newType = el.dataset.type;
-          this.setState({ newType, newDeptId: '', newQ: '', message: null });
-          if (newType === 'department') this.loadDepartments();
+          this.setState({ newType, newDeptId: '', newDeptName: '', newQ: '', message: null });
+          if (newType === 'department' || newType === 'search') this.loadDepartments();
         }
       });
     });

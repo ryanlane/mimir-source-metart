@@ -84,6 +84,8 @@ def fetch_object_ids(gallery: Dict[str, Any]) -> List[int]:
                 params["dateBegin"] = str(gallery["date_begin"])
             if gallery.get("date_end"):
                 params["dateEnd"] = str(gallery["date_end"])
+            if gallery.get("medium", "").strip():
+                params["medium"] = gallery["medium"].strip()
             resp = requests.get(
                 f"{_API_BASE}/search",
                 params=params,
@@ -160,7 +162,13 @@ def fetch_gallery_artworks(
         return []
 
     sample_size = min(max_count * 2, _MAX_ATTEMPTS, len(all_ids))
-    sampled = random.sample(all_ids, sample_size)
+    gtype = gallery.get("type", "highlights")
+    if gtype == "search":
+        # Search results may be relevance-ranked; keep the API's order so the
+        # most representative items are fetched first rather than a random slice.
+        sampled = all_ids[:sample_size]
+    else:
+        sampled = random.sample(all_ids, sample_size)
 
     sess = _session()
     artworks: List[Dict[str, Any]] = []

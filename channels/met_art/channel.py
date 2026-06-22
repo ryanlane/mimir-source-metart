@@ -347,6 +347,7 @@ class MetArtChannel:
                 "label": label,
                 "type": gtype,
                 "department_id": body.get("department_id") or None,
+                "department_name": (body.get("department_name") or "").strip() or None,
                 "q": (body.get("q") or "").strip(),
                 "is_public_domain": bool(body.get("is_public_domain", True)),
                 "date_begin": body.get("date_begin") or None,
@@ -361,6 +362,47 @@ class MetArtChannel:
             return JSONResponse({
                 "success": True,
                 "gallery": gallery,
+                "settings": self.settings.to_dict(),
+            })
+
+        @router.put("/galleries/{gallery_id}")
+        async def update_gallery(gallery_id: str, request: Request):
+            gallery_index = next(
+                (i for i, g in enumerate(self.settings.galleries) if g["id"] == gallery_id),
+                None,
+            )
+            if gallery_index is None:
+                raise HTTPException(404, f"Gallery '{gallery_id}' not found")
+
+            body = await request.json()
+            label = (body.get("label") or "").strip()
+            if not label:
+                raise HTTPException(400, "label is required")
+
+            gtype = body.get("type", self.settings.galleries[gallery_index].get("type", "highlights"))
+            if gtype not in ("highlights", "department", "search"):
+                raise HTTPException(400, f"Unknown gallery type: {gtype}")
+
+            updated: Dict[str, Any] = {
+                "id": gallery_id,
+                "label": label,
+                "type": gtype,
+                "department_id": body.get("department_id") or None,
+                "department_name": (body.get("department_name") or "").strip() or None,
+                "q": (body.get("q") or "").strip(),
+                "is_public_domain": bool(body.get("is_public_domain", True)),
+                "date_begin": body.get("date_begin") or None,
+                "date_end": body.get("date_end") or None,
+                "medium": (body.get("medium") or "").strip(),
+            }
+
+            self.settings.galleries[gallery_index] = updated
+            self._save_settings()
+            self.cache.mark_stale(gallery_id)
+            asyncio.create_task(self._ensure_cache(gallery_id))
+            return JSONResponse({
+                "success": True,
+                "gallery": updated,
                 "settings": self.settings.to_dict(),
             })
 
