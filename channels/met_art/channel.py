@@ -54,6 +54,7 @@ class MetArtChannel:
         self.cache = ArtworkCache(self.data_dir / "artworks_cache.json")
         self.last_error: Optional[str] = None
         self._recently_shown: Dict[str, deque] = {}
+        self._refreshing: set = set()  # gallery IDs currently being refreshed
 
         logger.info("[MetArt] Initialized at %s", self.channel_dir)
 
@@ -134,7 +135,34 @@ class MetArtChannel:
     # ------------------------------------------------------------------
     # Cache management
 
+    async def _refresh_gallery(self, gallery: Dict[str, Any]) -> None:
+        """Fetch and persist artworks for one gallery. No-ops if already in progress."""
+        gid = gallery["id"]
+        if gid in self._refreshing:
+            return
+        self._refreshing.add(gid)
+        logger.info("[MetArt] Refreshing cache for gallery '%s'", gid)
+        try:
+            artworks = await asyncio.to_thread(
+                _fetcher.fetch_gallery_artworks,
+                gallery,
+                self.settings.cache_max_per_gallery,
+            )
+            self.cache.update(gid, artworks)
+            self.last_error = None
+        except Exception as exc:
+            logger.error("[MetArt] Cache refresh failed for '%s': %s", gid, exc)
+            self.last_error = str(exc)
+        finally:
+            self._refreshing.discard(gid)
+
     async def _ensure_cache(self, gallery_id: Optional[str] = None) -> None:
+        """Ensure galleries have cached artworks.
+
+        If a gallery is stale but already has artworks, the refresh runs in the
+        background so request_image is never blocked by a slow Met API crawl.
+        Only blocks when the gallery cache is completely empty (initial fill).
+        """
         galleries = (
             [g for g in self.settings.galleries if g["id"] == gallery_id]
             if gallery_id
@@ -144,18 +172,14 @@ class MetArtChannel:
             gid = gallery["id"]
             if not self.cache.needs_refresh(gid, self.settings.refresh_interval_hours):
                 continue
-            logger.info("[MetArt] Refreshing cache for gallery '%s'", gid)
-            try:
-                artworks = await asyncio.to_thread(
-                    _fetcher.fetch_gallery_artworks,
-                    gallery,
-                    self.settings.cache_max_per_gallery,
-                )
-                self.cache.update(gid, artworks)
-                self.last_error = None
-            except Exception as exc:
-                logger.error("[MetArt] Cache refresh failed for '%s': %s", gid, exc)
-                self.last_error = str(exc)
+            if gid in self._refreshing:
+                continue
+            if self.cache.get_artworks(gid):
+                # Stale but non-empty: serve existing artworks, refresh in background
+                asyncio.create_task(self._refresh_gallery(gallery))
+            else:
+                # Empty: must block until we have something to serve
+                await self._refresh_gallery(gallery)
 
     # ------------------------------------------------------------------
     # Mimir channel protocol
@@ -358,7 +382,7 @@ class MetArtChannel:
             self.settings.galleries.append(gallery)
             self._save_settings()
 
-            asyncio.create_task(self._ensure_cache(gid))
+            asyncio.create_task(self._refresh_gallery(gallery))
             return JSONResponse({
                 "success": True,
                 "gallery": gallery,
@@ -399,7 +423,7 @@ class MetArtChannel:
             self.settings.galleries[gallery_index] = updated
             self._save_settings()
             self.cache.mark_stale(gallery_id)
-            asyncio.create_task(self._ensure_cache(gallery_id))
+            asyncio.create_task(self._refresh_gallery(updated))
             return JSONResponse({
                 "success": True,
                 "gallery": updated,
@@ -448,6 +472,33 @@ class MetArtChannel:
                 "success": True,
                 "message": f"Refresh started for {gallery_id or 'all galleries'}",
             })
+
+        @router.post("/count-estimate")
+        async def count_estimate(request: Request):
+            body: Dict[str, Any] = {}
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+            gtype = body.get("type", "highlights")
+            if gtype not in ("highlights", "department", "search"):
+                raise HTTPException(400, f"Unknown gallery type: {gtype}")
+            gallery_config: Dict[str, Any] = {
+                "id": "__preview__",
+                "type": gtype,
+                "q": (body.get("q") or "").strip(),
+                "department_id": body.get("department_id") or None,
+                "is_public_domain": bool(body.get("is_public_domain", True)),
+                "date_begin": body.get("date_begin") or None,
+                "date_end": body.get("date_end") or None,
+                "medium": (body.get("medium") or "").strip(),
+            }
+            try:
+                ids = await asyncio.to_thread(_fetcher.fetch_object_ids, gallery_config)
+                return JSONResponse({"count": len(ids)})
+            except Exception as exc:
+                logger.warning("[MetArt] count_estimate failed: %s", exc)
+                raise HTTPException(500, "Failed to estimate count")
 
         @router.post("/request-image")
         async def request_image_binary(request: Request):

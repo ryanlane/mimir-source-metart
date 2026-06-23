@@ -167,6 +167,8 @@ class MetArtManager extends HTMLElement {
       showAddPanel: false,
       showSettings: false,
       message: null,
+      estimateCount: null,   // null = unchecked, number = result, -1 = error
+      estimatingCount: false,
     };
   }
 
@@ -227,6 +229,8 @@ class MetArtManager extends HTMLElement {
       newDateEnd: '',
       newMedium: '',
       message: null,
+      estimateCount: null,
+      estimatingCount: false,
     });
   }
 
@@ -244,6 +248,8 @@ class MetArtManager extends HTMLElement {
       newDateEnd: gallery.date_end ? String(gallery.date_end) : '',
       newMedium: gallery.medium || '',
       message: null,
+      estimateCount: null,
+      estimatingCount: false,
     });
     // Pre-load departments if this gallery uses them
     if (gallery.type === 'department' || (gallery.type === 'search' && gallery.department_id)) {
@@ -374,6 +380,22 @@ class MetArtManager extends HTMLElement {
     }
   }
 
+  async checkCountEstimate() {
+    this.setState({ estimatingCount: true, estimateCount: null });
+    try {
+      const resp = await fetch(`${this.apiBase}/count-estimate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this._buildGalleryPayload()),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      this.setState({ estimatingCount: false, estimateCount: data.count });
+    } catch (_err) {
+      this.setState({ estimatingCount: false, estimateCount: -1 });
+    }
+  }
+
   async saveDisplaySettings() {
     const root = this.shadowRoot;
     const patch = {
@@ -469,6 +491,7 @@ class MetArtManager extends HTMLElement {
     const {
       editGalleryId, newType, newLabel, newDeptId, newQ, newPublicDomain,
       newDateBegin, newDateEnd, newMedium, saving, departments, loadingDepts,
+      estimateCount, estimatingCount,
     } = this.state;
     const isEdit = !!editGalleryId;
 
@@ -545,7 +568,19 @@ class MetArtManager extends HTMLElement {
             <span class="field-hint">Filters to a specific material or technique</span>
           </div>
         </div>
-        <div style="display:flex;justify-content:flex-end;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="btn btn-secondary btn-sm" data-action="check-count" ${estimatingCount ? 'disabled' : ''}>
+              ${estimatingCount ? '<span class="spinner"></span> Checking…' : '≈ Check count'}
+            </button>
+            ${estimateCount === null ? '' :
+              estimateCount < 0
+                ? `<span style="font-size:12px;color:var(--color-error,#f87171)">Couldn't reach Met API</span>`
+                : estimateCount === 0
+                  ? `<span style="font-size:12px;color:var(--color-warning,#fbbf24)">No matching objects found — try adjusting filters</span>`
+                  : `<span style="font-size:12px;color:var(--color-text-secondary,#888)">≈ ${estimateCount.toLocaleString()} objects in Met collection</span>`
+            }
+          </div>
           <button class="btn btn-primary" data-action="submit-gallery" ${saving ? 'disabled' : ''}>
             ${saving ? `<span class="spinner"></span> ${isEdit ? 'Saving…' : 'Creating…'}` : (isEdit ? 'Save Changes' : '+ Create Gallery')}
           </button>
@@ -663,8 +698,10 @@ class MetArtManager extends HTMLElement {
           await this.saveDisplaySettings();
         } else if (a === 'set-type') {
           const newType = el.dataset.type;
-          this.setState({ newType, newDeptId: '', newDeptName: '', newQ: '', message: null });
+          this.setState({ newType, newDeptId: '', newDeptName: '', newQ: '', message: null, estimateCount: null });
           if (newType === 'department' || newType === 'search') this.loadDepartments();
+        } else if (a === 'check-count') {
+          await this.checkCountEstimate();
         }
       });
     });
@@ -676,15 +713,15 @@ class MetArtManager extends HTMLElement {
       deptSelect.addEventListener('mousedown', () => this.loadDepartments());
     }
 
-    // Two-way bind all text/select/number inputs
+    // Two-way bind all text/select/number inputs; clear stale count estimate on change
     root.querySelectorAll('[data-field]').forEach(el => {
-      el.addEventListener('input', () => { this.state[el.dataset.field] = el.value; });
-      el.addEventListener('change', () => { this.state[el.dataset.field] = el.value; });
+      el.addEventListener('input', () => { this.state[el.dataset.field] = el.value; this.state.estimateCount = null; });
+      el.addEventListener('change', () => { this.state[el.dataset.field] = el.value; this.state.estimateCount = null; });
     });
 
-    // Checkbox binding
+    // Checkbox binding; clear stale count estimate on change
     root.querySelectorAll('[data-field-check]').forEach(el => {
-      el.addEventListener('change', () => { this.state[el.dataset.fieldCheck] = el.checked; });
+      el.addEventListener('change', () => { this.state[el.dataset.fieldCheck] = el.checked; this.state.estimateCount = null; });
     });
   }
 }

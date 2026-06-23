@@ -1,4 +1,5 @@
 """Tests for channel.py — MetArtChannel business logic with mocked fetcher."""
+import asyncio
 import json
 from unittest.mock import patch
 
@@ -68,6 +69,58 @@ class TestSettingsPersistence:
 
 
 # ---------------------------------------------------------------------------
+# _refresh_gallery
+# ---------------------------------------------------------------------------
+
+class TestRefreshGallery:
+    async def test_fetches_and_updates_cache(self, channel):
+        gallery = next(g for g in channel.settings.galleries if g["id"] == "highlights")
+        artworks = [make_artwork(i) for i in range(3)]
+        with patch("channels.met_art.fetcher.fetch_gallery_artworks", return_value=artworks):
+            await channel._refresh_gallery(gallery)
+        assert len(channel.cache.get_artworks("highlights")) == 3
+
+    async def test_deduplicates_concurrent_refreshes(self, channel):
+        """Two concurrent calls to _refresh_gallery for the same gallery must
+        only trigger one fetch — the second sees the gallery in _refreshing and exits."""
+        gallery = next(g for g in channel.settings.galleries if g["id"] == "highlights")
+        fetch_count = 0
+
+        def sync_fetch(gallery, max_count=200):
+            nonlocal fetch_count
+            fetch_count += 1
+            return [make_artwork(1)]
+
+        # asyncio.to_thread yields back to the event loop, giving the second
+        # coroutine a chance to run and observe _refreshing before the first completes
+        with patch("channels.met_art.fetcher.fetch_gallery_artworks", side_effect=sync_fetch):
+            await asyncio.gather(
+                channel._refresh_gallery(gallery),
+                channel._refresh_gallery(gallery),
+            )
+
+        assert fetch_count == 1
+
+    async def test_clears_refreshing_flag_on_success(self, channel):
+        gallery = next(g for g in channel.settings.galleries if g["id"] == "highlights")
+        with patch("channels.met_art.fetcher.fetch_gallery_artworks", return_value=[make_artwork(1)]):
+            await channel._refresh_gallery(gallery)
+        assert "highlights" not in channel._refreshing
+
+    async def test_clears_refreshing_flag_on_error(self, channel):
+        gallery = next(g for g in channel.settings.galleries if g["id"] == "highlights")
+        with patch("channels.met_art.fetcher.fetch_gallery_artworks", side_effect=Exception("API down")):
+            await channel._refresh_gallery(gallery)
+        assert "highlights" not in channel._refreshing
+
+    async def test_sets_last_error_on_fetch_failure(self, channel):
+        gallery = next(g for g in channel.settings.galleries if g["id"] == "highlights")
+        with patch("channels.met_art.fetcher.fetch_gallery_artworks", side_effect=Exception("net error")):
+            await channel._refresh_gallery(gallery)
+        assert channel.last_error is not None
+
+
+# ---------------------------------------------------------------------------
 # _ensure_cache
 # ---------------------------------------------------------------------------
 
@@ -90,6 +143,10 @@ class TestEnsureCache:
         new_artworks = [make_artwork(i, f"New {i}") for i in range(10, 16)]
         with patch("channels.met_art.fetcher.fetch_gallery_artworks", return_value=new_artworks):
             await channel._ensure_cache("impressionism")
+            # stale+nonempty → background task; drain inside the patch context
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         artworks = channel.cache.get_artworks("impressionism")
         assert len(artworks) == 6
@@ -168,13 +225,13 @@ class TestRequestImage:
         assert result["object_id"] in valid_ids
 
     async def test_uses_updated_gallery_config_after_settings_change(self, channel):
-        """Regression test: editing a gallery's settings must cause the next request_image
-        to fetch artworks using the new config, not serve stale cache from the old config."""
-        # Seed old artworks in cache
+        """After editing settings, request_image must NOT block waiting for the new
+        cache build (avoids the scene_refresh_service TimeoutError seen in production).
+        It serves existing artworks immediately and triggers a background refresh
+        with the new gallery config."""
         old_artworks = [make_artwork(i, f"Old {i}") for i in range(1, 6)]
         channel.cache.update("highlights", old_artworks)
 
-        # Simulate the user editing the gallery in the UI
         idx = next(i for i, g in enumerate(channel.settings.galleries) if g["id"] == "highlights")
         channel.settings.galleries[idx] = {
             "id": "highlights",
@@ -189,7 +246,7 @@ class TestRequestImage:
             "medium": "",
         }
         channel._save_settings()
-        channel.cache.mark_stale("highlights")  # what update_gallery handler does
+        channel.cache.mark_stale("highlights")
 
         new_artworks = [make_artwork(i, f"European {i}") for i in range(100, 106)]
         fetch_calls = []
@@ -200,16 +257,23 @@ class TestRequestImage:
 
         with patch("channels.met_art.fetcher.fetch_gallery_artworks", side_effect=capture_fetch), \
              patch("channels.met_art.fetcher.fetch_artwork_image", return_value=FAKE_IMAGE):
+            # First request after settings change: returns immediately with old artworks
             result = await channel.request_image({"subchannel_id": "highlights"})
+            assert result["success"] is True
+            assert result["object_id"] in range(1, 6)  # old artworks served, no timeout
 
-        # The fetcher must have been called with the NEW gallery config
+            # Drain background refresh tasks within the patch context
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        # Background fetch used the new gallery config
         assert len(fetch_calls) == 1
         assert fetch_calls[0]["type"] == "department"
         assert fetch_calls[0]["department_id"] == 11
 
-        # The returned artwork must be from the new set
-        assert result["success"] is True
-        assert result["object_id"] in range(100, 106)
+        # New artworks are now in cache for subsequent requests
+        assert all(a["object_id"] in range(100, 106) for a in channel.cache.get_artworks("highlights"))
 
     async def test_falls_back_to_all_galleries_for_unknown_subchannel(self, channel_with_cache):
         with patch("channels.met_art.fetcher.fetch_gallery_artworks", return_value=[]), \
@@ -263,6 +327,86 @@ class TestRequestImage:
         assert result["success"] is True
         # small_image URLs from make_artwork contain "_small"
         assert "_small" in fetched_urls[0]
+
+
+# ---------------------------------------------------------------------------
+# count_estimate (via request_image route's underlying logic)
+# ---------------------------------------------------------------------------
+
+class TestCountEstimate:
+    async def test_returns_count_from_fetch_object_ids(self, channel):
+        with patch("channels.met_art.fetcher.fetch_object_ids", return_value=list(range(42))):
+            from fastapi.testclient import TestClient
+            from fastapi import FastAPI
+            app = FastAPI()
+            app.include_router(channel.get_router(), prefix=f"/api/channels/{channel.id}")
+            client = TestClient(app)
+            resp = client.post(
+                f"/api/channels/{channel.id}/count-estimate",
+                json={"type": "search", "q": "monet", "is_public_domain": True},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 42
+
+    async def test_returns_zero_when_no_matches(self, channel):
+        with patch("channels.met_art.fetcher.fetch_object_ids", return_value=[]):
+            from fastapi.testclient import TestClient
+            from fastapi import FastAPI
+            app = FastAPI()
+            app.include_router(channel.get_router(), prefix=f"/api/channels/{channel.id}")
+            client = TestClient(app)
+            resp = client.post(
+                f"/api/channels/{channel.id}/count-estimate",
+                json={"type": "highlights", "is_public_domain": True},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 0
+
+    async def test_rejects_unknown_gallery_type(self, channel):
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI
+        app = FastAPI()
+        app.include_router(channel.get_router(), prefix=f"/api/channels/{channel.id}")
+        client = TestClient(app)
+        resp = client.post(
+            f"/api/channels/{channel.id}/count-estimate",
+            json={"type": "invalid_type"},
+        )
+        assert resp.status_code == 400
+
+    async def test_passes_gallery_config_to_fetcher(self, channel):
+        captured = {}
+
+        def capture(gallery):
+            captured.update(gallery)
+            return list(range(10))
+
+        with patch("channels.met_art.fetcher.fetch_object_ids", side_effect=capture):
+            from fastapi.testclient import TestClient
+            from fastapi import FastAPI
+            app = FastAPI()
+            app.include_router(channel.get_router(), prefix=f"/api/channels/{channel.id}")
+            client = TestClient(app)
+            client.post(
+                f"/api/channels/{channel.id}/count-estimate",
+                json={
+                    "type": "search",
+                    "q": "impressionism",
+                    "is_public_domain": True,
+                    "department_id": 11,
+                    "date_begin": 1860,
+                    "date_end": 1920,
+                    "medium": "Oil on canvas",
+                },
+            )
+
+        assert captured["type"] == "search"
+        assert captured["q"] == "impressionism"
+        assert captured["department_id"] == 11
+        assert captured["date_begin"] == 1860
+        assert captured["date_end"] == 1920
+        assert captured["medium"] == "Oil on canvas"
+        assert captured["is_public_domain"] is True
 
 
 # ---------------------------------------------------------------------------

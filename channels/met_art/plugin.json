@@ -2,7 +2,7 @@
   "id": "com.metmuseum.art",
   "name": "Met Museum Art",
   "description": "Displays artworks from The Metropolitan Museum of Art's open collection. Browse by department, keyword search, or highlights gallery. No API key required.",
-  "version": "1.1.1",
+  "version": "1.2.1",
   "type": "embedded",
   "entry_point": "channel.py",
   "class_name": "MetArtChannel",
