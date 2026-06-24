@@ -35,6 +35,12 @@ except ImportError:
     _PIL = False
     logger.warning("[MetArt] Pillow not installed — image resizing disabled")
 
+try:
+    import base64 as _base64
+    import requests as _req
+except ImportError:
+    _req = None  # type: ignore[assignment]
+
 
 class MetArtChannel:
     def __init__(self, channel_dir: str):
@@ -55,8 +61,23 @@ class MetArtChannel:
         self.last_error: Optional[str] = None
         self._recently_shown: Dict[str, deque] = {}
         self._refreshing: set = set()  # gallery IDs currently being refreshed
+        self._last_shown: Dict[str, Dict] = {}  # gallery_id → last artwork shown (for details sync)
+        self._jinja = self._make_jinja()
 
         logger.info("[MetArt] Initialized at %s", self.channel_dir)
+
+    def _make_jinja(self):
+        try:
+            from jinja2 import Environment, FileSystemLoader, select_autoescape
+            tpl_dir = _PLUGIN_DIR / "templates"
+            tpl_dir.mkdir(exist_ok=True)
+            return Environment(
+                loader=FileSystemLoader(str(tpl_dir)),
+                autoescape=select_autoescape(["html"]),
+            )
+        except ImportError:
+            logger.warning("[MetArt] jinja2 not installed — details variant unavailable")
+            return None
 
     @property
     def id(self) -> str:
@@ -196,6 +217,10 @@ class MetArtChannel:
             "capabilities": {
                 "supports_upload": False,
                 "supports_subchannels": True,
+                "content_variants": [
+                    {"id": "image",   "label": "Artwork Image"},
+                    {"id": "details", "label": "Artwork Details"},
+                ],
             },
             "ui": {
                 "components": {"manager": f"/api/channels/{self.id}/ui/manage.esm.js"},
@@ -239,20 +264,118 @@ class MetArtChannel:
         return None
 
     # ------------------------------------------------------------------
+    # Details variant helpers
+
+    def _thumb_b64(self, artwork: Dict) -> Optional[str]:
+        if _req is None:
+            return None
+        url = artwork.get("small_image") or artwork.get("primary_image")
+        if not url:
+            return None
+        try:
+            resp = _req.get(url, timeout=8)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+            return f"data:{ct};base64,{_base64.b64encode(resp.content).decode()}"
+        except Exception as exc:
+            logger.debug("[MetArt] thumb fetch failed: %s", exc)
+            return None
+
+    async def _render_details(self, artwork: Dict, width: int, height: int) -> Optional[bytes]:
+        if self._jinja is None:
+            return None
+        try:
+            from app.services.html_renderer import html_renderer_service
+        except ImportError:
+            return None
+        if not html_renderer_service.available:
+            return None
+
+        aspect = width / height if height else 1.0
+        if aspect >= 1.2:
+            layout = "landscape"
+        elif aspect <= 0.85:
+            layout = "portrait"
+        else:
+            layout = "square"
+
+        thumb = await asyncio.to_thread(self._thumb_b64, artwork)
+        template = self._jinja.get_template("details.html")
+        html = template.render(
+            layout=layout,
+            width=width,
+            height=height,
+            title=artwork.get("title", "Unknown"),
+            artist=artwork.get("artist", ""),
+            date=artwork.get("date", ""),
+            medium=artwork.get("medium", ""),
+            department=artwork.get("department", ""),
+            culture=artwork.get("culture", ""),
+            object_url=artwork.get("object_url", ""),
+            thumb=thumb,
+        )
+        return await html_renderer_service.render(html, width, height)
+
+    # ------------------------------------------------------------------
     # Image request
 
     async def request_image(self, request_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         data = request_data or {}
+        settings_block = data.get("settings") or {}
         gallery_id = (
             data.get("subchannel_id")
             or data.get("gallery_id")
-            or (data.get("settings") or {}).get("subChannelId")
+            or settings_block.get("subChannelId")
         ) or None
 
         known_ids = {g["id"] for g in self.settings.galleries}
         if gallery_id and gallery_id not in known_ids:
             gallery_id = None
 
+        content_variant = settings_block.get("content_variant") or "image"
+        cache_key = gallery_id or "__all__"
+
+        # Details variant: render text card for the last-shown artwork
+        if content_variant == "details":
+            resolution = settings_block.get("resolution") or data.get("resolution")
+            width, height = 800, 480
+            if resolution and len(resolution) == 2:
+                try:
+                    width, height = int(resolution[0]), int(resolution[1])
+                except (TypeError, ValueError):
+                    pass
+
+            artwork = self._last_shown.get(cache_key)
+            if not artwork:
+                # Cold start: pick one so both displays can sync on next tick
+                await self._ensure_cache(gallery_id)
+                artworks = self.cache.get_artworks_combined(gallery_id)
+                if not artworks:
+                    return {"success": False, "error": "No artworks cached yet"}
+                artwork = self._pick_artwork(artworks, cache_key)
+                if artwork:
+                    self._last_shown[cache_key] = artwork
+
+            if not artwork:
+                return {"success": False, "error": "No artwork available for details"}
+
+            img_bytes = await self._render_details(artwork, width, height)
+            if not img_bytes:
+                return {"success": False, "error": "Details renderer unavailable (Playwright not running)"}
+
+            self.last_error = None
+            return {
+                "success": True,
+                "bytes": img_bytes,
+                "content_type": "image/jpeg",
+                "preferred_transport": "bytes",
+                "title": artwork.get("title", ""),
+                "artist": artwork.get("artist", ""),
+                "gallery": gallery_id,
+                "content_variant": "details",
+            }
+
+        # Image variant (default): pick artwork, render image, update _last_shown
         await self._ensure_cache(gallery_id)
 
         artworks = self.cache.get_artworks_combined(gallery_id)
@@ -262,7 +385,7 @@ class MetArtChannel:
                 "error": "No artworks cached yet — open the channel manager and click Refresh",
             }
 
-        resolution = (data.get("settings") or {}).get("resolution") or data.get("resolution")
+        resolution = settings_block.get("resolution") or data.get("resolution")
         target_size: Optional[tuple] = None
         if resolution and len(resolution) == 2:
             try:
@@ -270,7 +393,6 @@ class MetArtChannel:
             except (TypeError, ValueError):
                 pass
 
-        cache_key = gallery_id or "__all__"
         chosen = self._pick_artwork(artworks, cache_key)
 
         for _ in range(5):
@@ -285,6 +407,7 @@ class MetArtChannel:
             if img_bytes:
                 if target_size:
                     img_bytes = self._resize(img_bytes, target_size, self.settings.fit_mode)
+                self._last_shown[cache_key] = chosen  # keep details in sync
                 self.last_error = None
                 return {
                     "success": True,
