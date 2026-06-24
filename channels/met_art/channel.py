@@ -35,11 +35,6 @@ except ImportError:
     _PIL = False
     logger.warning("[MetArt] Pillow not installed — image resizing disabled")
 
-try:
-    import base64 as _base64
-    import requests as _req
-except ImportError:
-    _req = None  # type: ignore[assignment]
 
 
 class MetArtChannel:
@@ -266,21 +261,6 @@ class MetArtChannel:
     # ------------------------------------------------------------------
     # Details variant helpers
 
-    def _thumb_b64(self, artwork: Dict) -> Optional[str]:
-        if _req is None:
-            return None
-        url = artwork.get("small_image") or artwork.get("primary_image")
-        if not url:
-            return None
-        try:
-            resp = _req.get(url, timeout=8)
-            resp.raise_for_status()
-            ct = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-            return f"data:{ct};base64,{_base64.b64encode(resp.content).decode()}"
-        except Exception as exc:
-            logger.debug("[MetArt] thumb fetch failed: %s", exc)
-            return None
-
     async def _render_details(self, artwork: Dict, width: int, height: int) -> Optional[bytes]:
         if self._jinja is None:
             return None
@@ -291,18 +271,8 @@ class MetArtChannel:
         if not html_renderer_service.available:
             return None
 
-        aspect = width / height if height else 1.0
-        if aspect >= 1.2:
-            layout = "landscape"
-        elif aspect <= 0.85:
-            layout = "portrait"
-        else:
-            layout = "square"
-
-        thumb = await asyncio.to_thread(self._thumb_b64, artwork)
         template = self._jinja.get_template("details.html")
         html = template.render(
-            layout=layout,
             width=width,
             height=height,
             title=artwork.get("title", "Unknown"),
@@ -312,7 +282,6 @@ class MetArtChannel:
             department=artwork.get("department", ""),
             culture=artwork.get("culture", ""),
             object_url=artwork.get("object_url", ""),
-            thumb=thumb,
         )
         return await html_renderer_service.render(html, width, height)
 
