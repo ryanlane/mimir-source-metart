@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from .mimir_utils import http_session
+
 logger = logging.getLogger("mimir.channels.metart.fetcher")
 
 _API_BASE = "https://collectionapi.metmuseum.org/public/collection/v1"
@@ -24,9 +26,7 @@ _MAX_ATTEMPTS = 400    # hard cap on detail fetch attempts per gallery build
 
 
 def _session() -> requests.Session:
-    s = requests.Session()
-    s.headers["User-Agent"] = _USER_AGENT
-    return s
+    return http_session(_USER_AGENT)
 
 
 def fetch_departments() -> List[Dict[str, Any]]:

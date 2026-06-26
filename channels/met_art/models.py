@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .mimir_utils import JsonCache, SettingsMixin
 
 
 def make_gallery_id(label: str, existing_ids: set) -> str:
@@ -54,40 +55,19 @@ _DEFAULT_GALLERIES: List[Dict[str, Any]] = [
 
 
 @dataclass
-class Settings:
+class Settings(SettingsMixin):
     galleries: List[Dict[str, Any]] = field(default_factory=lambda: list(_DEFAULT_GALLERIES))
     fit_mode: str = "letterbox"
     image_quality: str = "primary"
     cache_max_per_gallery: int = 200
     refresh_interval_hours: int = 168
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Settings":
-        known = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in data.items() if k in known})
-
-
-class ArtworkCache:
+class ArtworkCache(JsonCache):
     """Persists artwork metadata per gallery in a JSON file."""
 
-    def __init__(self, cache_path: Path):
-        self._path = cache_path
-        self._data: Dict[str, Any] = self._load()
-
-    def _load(self) -> Dict[str, Any]:
-        if self._path.exists():
-            try:
-                return json.loads(self._path.read_text())
-            except Exception:
-                pass
+    def _empty_state(self) -> Dict[str, Any]:
         return {"galleries": {}}
-
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._data, indent=2))
 
     def get_artworks(self, gallery_id: str) -> List[Dict[str, Any]]:
         return self._data.get("galleries", {}).get(gallery_id, {}).get("artworks", [])
