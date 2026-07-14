@@ -766,6 +766,10 @@ class MetArtChannel:
                     if result.get(k)
                 }
                 if meta:
+                    # So a client that renders its own overlay (instead of, or
+                    # in addition to, the baked-in one) draws it in the same
+                    # corner the user configured here.
+                    meta["overlay_position"] = self.settings.overlay_position
                     # Headers must be Latin-1-safe and are size-limited by most
                     # servers/proxies — base64 keeps it compact and ASCII-only
                     # regardless of accented artist/title characters.

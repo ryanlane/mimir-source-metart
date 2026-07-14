@@ -557,6 +557,8 @@ class TestMetadataHeader:
         assert decoded["medium"] == "Oil on canvas"
         assert decoded["culture"] == "French"
         assert "title" in decoded
+        # A client rendering its own overlay needs to know where to draw it.
+        assert decoded["overlay_position"] == channel_with_cache.settings.overlay_position
 
     async def test_header_absent_when_disabled(self, channel_with_cache):
         assert channel_with_cache.settings.include_metadata_in_response is False
