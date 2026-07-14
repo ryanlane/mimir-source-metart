@@ -33,6 +33,32 @@ class TestSettings:
         pub = s.to_public_dict()
         assert pub == s.to_dict()
 
+    def test_overlay_defaults(self):
+        s = Settings()
+        assert s.overlay_enabled is False
+        assert s.overlay_position == "bottom_left"
+        assert s.overlay_fields == ["title", "artist"]
+        assert s.include_metadata_in_response is False
+
+    def test_invalid_overlay_position_falls_back(self):
+        s = Settings(overlay_position="diagonally-off-screen")
+        assert s.overlay_position == "bottom_left"
+
+    def test_invalid_overlay_fields_are_filtered(self):
+        s = Settings(overlay_fields=["title", "not_a_real_field", "medium"])
+        assert s.overlay_fields == ["title", "medium"]
+
+    def test_empty_overlay_fields_falls_back_to_default(self):
+        s = Settings(overlay_fields=["not_a_real_field"])
+        assert s.overlay_fields == ["title", "artist"]
+
+    def test_overlay_settings_roundtrip(self):
+        s = Settings(overlay_enabled=True, overlay_position="top_right", overlay_fields=["date", "medium"])
+        s2 = Settings.from_dict(s.to_dict())
+        assert s2.overlay_enabled is True
+        assert s2.overlay_position == "top_right"
+        assert s2.overlay_fields == ["date", "medium"]
+
 
 class TestArtworkCache:
     @pytest.fixture

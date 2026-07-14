@@ -54,6 +54,14 @@ _DEFAULT_GALLERIES: List[Dict[str, Any]] = [
 ]
 
 
+OVERLAY_POSITIONS = (
+    "top_left", "top_right", "bottom_left", "bottom_right", "top_center", "bottom_center",
+)
+# Same fields the paired "details" display already renders (see templates/details.html).
+OVERLAY_FIELDS_AVAILABLE = ("title", "artist", "date", "medium", "department", "culture")
+_DEFAULT_OVERLAY_FIELDS = ["title", "artist"]
+
+
 @dataclass
 class Settings(SettingsMixin):
     galleries: List[Dict[str, Any]] = field(default_factory=lambda: list(_DEFAULT_GALLERIES))
@@ -61,6 +69,22 @@ class Settings(SettingsMixin):
     image_quality: str = "primary"
     cache_max_per_gallery: int = 200
     refresh_interval_hours: int = 168
+    # Bake artwork details directly onto the rendered image (useful for
+    # displays with no paired "details" screen).
+    overlay_enabled: bool = False
+    overlay_position: str = "bottom_left"
+    overlay_fields: List[str] = field(default_factory=lambda: list(_DEFAULT_OVERLAY_FIELDS))
+    # Attach the same details as an X-Artwork-Metadata response header on
+    # /request-image, so callers building the MQTT payload (or any other
+    # integration) can read them without parsing the image.
+    include_metadata_in_response: bool = False
+
+    def __post_init__(self) -> None:
+        if self.overlay_position not in OVERLAY_POSITIONS:
+            self.overlay_position = "bottom_left"
+        self.overlay_fields = [f for f in self.overlay_fields if f in OVERLAY_FIELDS_AVAILABLE] or list(
+            _DEFAULT_OVERLAY_FIELDS
+        )
 
 
 class ArtworkCache(JsonCache):

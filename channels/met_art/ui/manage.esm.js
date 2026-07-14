@@ -7,6 +7,26 @@ const GALLERY_TYPES = [
   { id: 'search',     name: 'Search',     description: 'Keyword search across the full collection' },
 ];
 
+// Same fields the paired "details" display already renders — kept in sync
+// with OVERLAY_FIELDS_AVAILABLE in models.py.
+const OVERLAY_FIELDS = [
+  { id: 'title',      label: 'Title' },
+  { id: 'artist',     label: 'Artist' },
+  { id: 'date',       label: 'Date' },
+  { id: 'medium',     label: 'Medium' },
+  { id: 'department', label: 'Gallery' },
+  { id: 'culture',    label: 'Culture' },
+];
+
+const OVERLAY_POSITIONS = [
+  { id: 'top_left',       label: 'Top left' },
+  { id: 'top_center',     label: 'Top center' },
+  { id: 'top_right',      label: 'Top right' },
+  { id: 'bottom_left',    label: 'Bottom left' },
+  { id: 'bottom_center',  label: 'Bottom center' },
+  { id: 'bottom_right',   label: 'Bottom right' },
+];
+
 const CSS = `
   :host {
     display: block;
@@ -398,11 +418,18 @@ class MetArtManager extends HTMLElement {
 
   async saveDisplaySettings() {
     const root = this.shadowRoot;
+    const overlayFields = Array.from(
+      root.querySelectorAll('input[data-overlay-field]:checked')
+    ).map((el) => el.dataset.overlayField);
     const patch = {
       fit_mode: root.querySelector('#setting-fit-mode')?.value || 'letterbox',
       image_quality: root.querySelector('#setting-image-quality')?.value || 'primary',
       cache_max_per_gallery: parseInt(root.querySelector('#setting-cache-max')?.value || '200', 10),
       refresh_interval_hours: parseInt(root.querySelector('#setting-refresh-hours')?.value || '168', 10),
+      overlay_enabled: !!root.querySelector('#setting-overlay-enabled')?.checked,
+      overlay_position: root.querySelector('#setting-overlay-position')?.value || 'bottom_left',
+      overlay_fields: overlayFields,
+      include_metadata_in_response: !!root.querySelector('#setting-include-metadata')?.checked,
     };
     this.setState({ saving: true, message: null });
     try {
@@ -619,6 +646,36 @@ class MetArtManager extends HTMLElement {
             <input id="setting-refresh-hours" type="number" min="1" max="720" value="${s.refresh_interval_hours || 168}" />
           </div>
         </div>
+
+        <div class="section-title" style="margin-top:8px">Artwork Details</div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="setting-include-metadata" ${s.include_metadata_in_response ? 'checked' : ''} />
+          <label for="setting-include-metadata">Include title/artist/date/etc. as an X-Artwork-Metadata response header (readable by MQTT/integration code)</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="setting-overlay-enabled" ${s.overlay_enabled ? 'checked' : ''} />
+          <label for="setting-overlay-enabled">Bake details onto the artwork image as an overlay</label>
+        </div>
+        <div class="settings-row" ${s.overlay_enabled ? '' : 'style="display:none"'} data-overlay-options>
+          <div class="field">
+            <label for="setting-overlay-position">Overlay Position</label>
+            <select id="setting-overlay-position">
+              ${OVERLAY_POSITIONS.map(p => `<option value="${p.id}" ${(s.overlay_position || 'bottom_left') === p.id ? 'selected' : ''}>${p.label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field field-label">
+            <label>Overlay Fields</label>
+            <div class="checkbox-row" style="flex-wrap:wrap; gap:12px">
+              ${OVERLAY_FIELDS.map(f => `
+                <span class="checkbox-row" style="gap:4px">
+                  <input type="checkbox" id="overlay-field-${f.id}" data-overlay-field="${f.id}"
+                    ${(s.overlay_fields || ['title', 'artist']).includes(f.id) ? 'checked' : ''} />
+                  <label for="overlay-field-${f.id}">${f.label}</label>
+                </span>`).join('')}
+            </div>
+          </div>
+        </div>
+
         <div class="settings-actions">
           <button class="btn btn-primary btn-sm" data-action="save-settings">Save Settings</button>
         </div>
@@ -705,6 +762,16 @@ class MetArtManager extends HTMLElement {
         }
       });
     });
+
+    // Show/hide the position+fields row without a full re-render, so any
+    // unsaved edits elsewhere in the settings panel aren't discarded.
+    const overlayToggle = root.querySelector('#setting-overlay-enabled');
+    const overlayOptions = root.querySelector('[data-overlay-options]');
+    if (overlayToggle && overlayOptions) {
+      overlayToggle.addEventListener('change', () => {
+        overlayOptions.style.display = overlayToggle.checked ? '' : 'none';
+      });
+    }
 
     // Load departments when department select is focused/clicked
     const deptSelect = root.querySelector('[data-action="load-depts-on-focus"]');

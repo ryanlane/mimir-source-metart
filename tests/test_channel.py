@@ -217,6 +217,11 @@ class TestRequestImage:
         assert "artist" in result
         assert "object_id" in result
         assert "object_url" in result
+        # medium/culture must be present too — the "details" paired display
+        # has always used them (see templates/details.html); the image
+        # variant's response dict silently omitted both until this change.
+        assert result["medium"] == "Oil on canvas"
+        assert result["culture"] == "French"
 
     async def test_object_id_comes_from_cached_artworks(self, channel_with_cache):
         valid_ids = {a["object_id"] for a in channel_with_cache.cache.get_artworks("highlights")}
@@ -447,3 +452,137 @@ class TestPickArtwork:
         # Both keys work independently; both return valid artworks
         assert result_a in artworks
         assert result_b in artworks
+
+
+# ---------------------------------------------------------------------------
+# Overlay: baking artwork details onto the image
+# ---------------------------------------------------------------------------
+
+def _make_real_jpeg(width=400, height=300, color=(30, 60, 90)) -> bytes:
+    """A real, PIL-decodable JPEG — FAKE_IMAGE's garbage bytes can't be used
+    here since the overlay needs to actually open and composite the image."""
+    from PIL import Image as PilImage
+    buf = __import__("io").BytesIO()
+    PilImage.new("RGB", (width, height), color).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+class TestOverlay:
+    def test_overlay_enabled_defaults_to_false(self, channel):
+        # The gate itself lives in request_image(), not in _apply_overlay()
+        # (which always draws when called) — covered by
+        # test_request_image_skips_overlay_when_disabled below.
+        assert channel.settings.overlay_enabled is False
+
+    def test_draws_when_fields_present_changes_pixels(self, channel):
+        original = _make_real_jpeg()
+        channel.settings.overlay_enabled = True
+        channel.settings.overlay_fields = ["title", "artist", "date", "medium"]
+        result = channel._apply_overlay(original, make_artwork(1, "A Very Long Title For Testing"))
+        assert result != original
+        from PIL import Image as PilImage
+        before = PilImage.open(__import__("io").BytesIO(original))
+        after = PilImage.open(__import__("io").BytesIO(result))
+        assert after.size == before.size  # overlay must not resize the artwork
+
+    def test_no_fields_selected_returns_bytes_unchanged(self, channel):
+        original = _make_real_jpeg()
+        channel.settings.overlay_fields = []  # direct assignment, bypassing __post_init__
+        result = channel._apply_overlay(original, make_artwork(1))
+        assert result == original
+
+    def test_missing_fields_on_artwork_are_skipped_gracefully(self, channel):
+        original = _make_real_jpeg()
+        channel.settings.overlay_fields = ["title", "culture"]
+        artwork = make_artwork(1)
+        artwork["culture"] = ""  # falsy — should just be omitted, not raise
+        result = channel._apply_overlay(original, artwork)
+        assert result != original  # title still draws
+
+    def test_all_six_positions_render_without_error(self, channel):
+        from channels.met_art.models import OVERLAY_POSITIONS
+        original = _make_real_jpeg()
+        channel.settings.overlay_fields = ["title", "artist", "date", "medium", "department", "culture"]
+        for position in OVERLAY_POSITIONS:
+            channel.settings.overlay_position = position
+            result = channel._apply_overlay(original, make_artwork(1, "Title " * 8))
+            assert result != original, f"position={position} produced no change"
+
+    def test_corrupt_bytes_fall_back_to_unchanged(self, channel):
+        channel.settings.overlay_fields = ["title"]
+        garbage = b"not a real image"
+        result = channel._apply_overlay(garbage, make_artwork(1))
+        assert result == garbage
+
+    async def test_request_image_applies_overlay_when_enabled(self, channel_with_cache):
+        real_jpeg = _make_real_jpeg()
+        channel_with_cache.settings.overlay_enabled = True
+        with patch("channels.met_art.fetcher.fetch_artwork_image", return_value=real_jpeg):
+            result = await channel_with_cache.request_image({"subchannel_id": "highlights"})
+        assert result["success"] is True
+        assert result["bytes"] != real_jpeg
+
+    async def test_request_image_skips_overlay_when_disabled(self, channel_with_cache):
+        real_jpeg = _make_real_jpeg()
+        assert channel_with_cache.settings.overlay_enabled is False
+        with patch("channels.met_art.fetcher.fetch_artwork_image", return_value=real_jpeg):
+            result = await channel_with_cache.request_image({"subchannel_id": "highlights"})
+        assert result["bytes"] == real_jpeg
+
+
+# ---------------------------------------------------------------------------
+# X-Artwork-Metadata response header
+# ---------------------------------------------------------------------------
+
+class TestMetadataHeader:
+    async def test_header_present_when_enabled(self, channel_with_cache):
+        channel_with_cache.settings.include_metadata_in_response = True
+        with patch("channels.met_art.fetcher.fetch_artwork_image", return_value=FAKE_IMAGE):
+            from fastapi.testclient import TestClient
+            from fastapi import FastAPI
+            app = FastAPI()
+            app.include_router(channel_with_cache.get_router(), prefix=f"/api/channels/{channel_with_cache.id}")
+            client = TestClient(app)
+            resp = client.post(
+                f"/api/channels/{channel_with_cache.id}/request-image",
+                json={"subchannel_id": "highlights"},
+            )
+        assert resp.status_code == 200
+        assert "X-Artwork-Metadata" in resp.headers
+
+        import base64
+        import json
+        decoded = json.loads(base64.urlsafe_b64decode(resp.headers["X-Artwork-Metadata"]))
+        assert decoded["artist"] == "Test Artist"
+        assert decoded["medium"] == "Oil on canvas"
+        assert decoded["culture"] == "French"
+        assert "title" in decoded
+
+    async def test_header_absent_when_disabled(self, channel_with_cache):
+        assert channel_with_cache.settings.include_metadata_in_response is False
+        with patch("channels.met_art.fetcher.fetch_artwork_image", return_value=FAKE_IMAGE):
+            from fastapi.testclient import TestClient
+            from fastapi import FastAPI
+            app = FastAPI()
+            app.include_router(channel_with_cache.get_router(), prefix=f"/api/channels/{channel_with_cache.id}")
+            client = TestClient(app)
+            resp = client.post(
+                f"/api/channels/{channel_with_cache.id}/request-image",
+                json={"subchannel_id": "highlights"},
+            )
+        assert resp.status_code == 200
+        assert "X-Artwork-Metadata" not in resp.headers
+
+    async def test_settings_put_validates_overlay_position(self, channel):
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI
+        app = FastAPI()
+        app.include_router(channel.get_router(), prefix=f"/api/channels/{channel.id}")
+        client = TestClient(app)
+        resp = client.put(
+            f"/api/channels/{channel.id}/settings",
+            json={"overlay_position": "not-a-real-position", "overlay_fields": ["title", "bogus"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["settings"]["overlay_position"] == "bottom_left"
+        assert resp.json()["settings"]["overlay_fields"] == ["title"]

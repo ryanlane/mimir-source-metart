@@ -2,7 +2,7 @@
   "id": "com.metmuseum.art",
   "name": "Met Museum Art",
   "description": "Displays artworks from The Metropolitan Museum of Art's open collection. Browse by department, keyword search, or highlights gallery. No API key required.",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "type": "embedded",
   "entry_point": "channel.py",
   "class_name": "MetArtChannel",
@@ -45,7 +45,11 @@
       "fit_mode": "letterbox",
       "image_quality": "primary",
       "cache_max_per_gallery": 200,
-      "refresh_interval_hours": 168
+      "refresh_interval_hours": 168,
+      "overlay_enabled": false,
+      "overlay_position": "bottom_left",
+      "overlay_fields": ["title", "artist"],
+      "include_metadata_in_response": false
     },
     "schema": {
       "type": "object",
@@ -85,6 +89,35 @@
           "title": "Cache Refresh Interval (hours)",
           "description": "How often to re-fetch the artwork list from the Met API (default: weekly)",
           "default": 168
+        },
+        "overlay_enabled": {
+          "type": "boolean",
+          "title": "Bake Details onto Image",
+          "description": "Draw title/artist/etc. directly onto the artwork image — useful when there's no paired details display",
+          "default": false
+        },
+        "overlay_position": {
+          "type": "string",
+          "enum": ["top_left", "top_right", "bottom_left", "bottom_right", "top_center", "bottom_center"],
+          "title": "Overlay Position",
+          "description": "Corner/edge where the baked-in details panel is drawn",
+          "default": "bottom_left"
+        },
+        "overlay_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["title", "artist", "date", "medium", "department", "culture"]
+          },
+          "title": "Overlay Fields",
+          "description": "Which artwork details to include in the baked-in overlay (same fields the paired details display uses)",
+          "default": ["title", "artist"]
+        },
+        "include_metadata_in_response": {
+          "type": "boolean",
+          "title": "Include Metadata in Response Header",
+          "description": "Attach title/artist/date/etc. as a base64 X-Artwork-Metadata header on /request-image, so integrations (e.g. an MQTT payload) can read them without parsing the image",
+          "default": false
         }
       }
     }

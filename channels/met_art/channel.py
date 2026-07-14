@@ -10,6 +10,7 @@ sub-channel. Users can create multiple galleries with different filters.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -22,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from .models import ArtworkCache, Settings, make_gallery_id
+from .models import OVERLAY_FIELDS_AVAILABLE, ArtworkCache, Settings, make_gallery_id
 from . import fetcher as _fetcher
 
 _PLUGIN_DIR = Path(__file__).parent
@@ -30,10 +31,44 @@ logger = logging.getLogger("mimir.channels.metart")
 
 try:
     from PIL import Image as _PilImage
+    from PIL import ImageDraw as _PilImageDraw
+    from PIL import ImageFont as _PilImageFont
     _PIL = True
 except ImportError:
     _PIL = False
     logger.warning("[MetArt] Pillow not installed — image resizing disabled")
+
+# Same fallback list genart uses — common system TTFs, then Pillow's bitmap
+# default. No shared font-loading utility exists yet in mimir-source-sdk
+# (each renderer-style plugin currently carries its own copy of this).
+_FONT_PATHS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+)
+_font_cache: Dict[tuple, Any] = {}
+
+
+def _load_font(size: int, bold: bool = False):
+    key = (size, bold)
+    font = _font_cache.get(key)
+    if font is not None:
+        return font
+    candidates = [p for p in _FONT_PATHS if ("Bold" in p) == bold]
+    for path in candidates:
+        try:
+            font = _PilImageFont.truetype(path, size)
+            break
+        except Exception:
+            continue
+    if font is None:
+        try:
+            font = _PilImageFont.load_default(size=size)  # Pillow >= 10
+        except TypeError:
+            font = _PilImageFont.load_default()
+    _font_cache[key] = font
+    return font
 
 
 
@@ -146,6 +181,110 @@ class MetArtChannel:
             return buf.getvalue()
         except Exception as exc:
             logger.warning("[MetArt] Resize failed: %s", exc)
+            return img_bytes
+
+    # ------------------------------------------------------------------
+    # Overlay: bakes the same details the paired "details" display shows
+    # directly onto the artwork image, for setups with no second screen.
+
+    _OVERLAY_LABELS = {
+        "date": "Date",
+        "medium": "Medium",
+        "department": "Gallery",
+        "culture": "Culture",
+    }
+
+    @staticmethod
+    def _truncate_to_width(draw, text: str, font, max_width: int) -> str:
+        if max_width <= 0 or draw.textlength(text, font=font) <= max_width:
+            return text
+        ellipsis = "…"
+        lo, hi = 0, len(text)
+        best = ellipsis
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[:mid].rstrip() + ellipsis
+            if draw.textlength(candidate, font=font) <= max_width:
+                best = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return best
+
+    def _apply_overlay(self, img_bytes: bytes, artwork: Dict[str, Any]) -> bytes:
+        if not _PIL:
+            return img_bytes
+        fields = [f for f in OVERLAY_FIELDS_AVAILABLE if f in self.settings.overlay_fields]
+        if not fields:
+            return img_bytes
+        try:
+            base = _PilImage.open(io.BytesIO(img_bytes)).convert("RGBA")
+            w, h = base.size
+            overlay = _PilImage.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = _PilImageDraw.Draw(overlay)
+
+            margin = max(10, round(min(w, h) * 0.035))
+            pad = max(8, round(min(w, h) * 0.022))
+            max_text_width = round(w * 0.6) - 2 * pad
+
+            title_font = _load_font(max(16, round(min(w, h) * 0.042)), bold=True)
+            artist_font = _load_font(max(13, round(min(w, h) * 0.026)))
+            meta_font = _load_font(max(11, round(min(w, h) * 0.020)))
+
+            # (text, font, color, gap-after-in-px)
+            rows: List[tuple] = []
+            if "title" in fields and artwork.get("title"):
+                text = self._truncate_to_width(draw, str(artwork["title"]), title_font, max_text_width)
+                rows.append((text, title_font, (255, 255, 255, 255), round(pad * 0.5)))
+            if "artist" in fields and artwork.get("artist"):
+                text = self._truncate_to_width(draw, str(artwork["artist"]), artist_font, max_text_width)
+                rows.append((text, artist_font, (170, 220, 170, 255), round(pad * 0.9)))
+            for key in ("date", "medium", "department", "culture"):
+                if key in fields and artwork.get(key):
+                    label = self._OVERLAY_LABELS[key]
+                    value = self._truncate_to_width(draw, str(artwork[key]), meta_font, max_text_width - 70)
+                    rows.append((f"{label.upper()}   {value}", meta_font, (190, 190, 190, 255), round(pad * 0.45)))
+
+            if not rows:
+                return img_bytes
+
+            line_heights = []
+            panel_w = 0
+            for text, font, _color, _gap in rows:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                line_heights.append(bbox[3] - bbox[1])
+                panel_w = max(panel_w, bbox[2] - bbox[0])
+            panel_w = min(panel_w + 2 * pad, w - 2 * margin)
+            panel_h = sum(line_heights) + sum(gap for *_, gap in rows) + 2 * pad
+
+            position = self.settings.overlay_position
+            if position == "top_left":
+                x, y = margin, margin
+            elif position == "top_right":
+                x, y = w - margin - panel_w, margin
+            elif position == "top_center":
+                x, y = (w - panel_w) // 2, margin
+            elif position == "bottom_right":
+                x, y = w - margin - panel_w, h - margin - panel_h
+            elif position == "bottom_center":
+                x, y = (w - panel_w) // 2, h - margin - panel_h
+            else:  # bottom_left (default)
+                x, y = margin, h - margin - panel_h
+
+            radius = max(6, round(pad * 0.6))
+            draw.rounded_rectangle([x, y, x + panel_w, y + panel_h], radius=radius, fill=(0, 0, 0, 165))
+
+            cursor_y = y + pad
+            for (text, font, color, gap), lh in zip(rows, line_heights):
+                draw.text((x + pad, cursor_y), text, font=font, fill=color)
+                cursor_y += lh + gap
+
+            composited = _PilImage.alpha_composite(base, overlay).convert("RGB")
+            buf = io.BytesIO()
+            composited.save(buf, format="JPEG", quality=92, optimize=True)
+            return buf.getvalue()
+        except Exception as exc:
+            logger.warning("[MetArt] Overlay render failed: %s", exc)
             return img_bytes
 
     # ------------------------------------------------------------------
@@ -376,6 +515,8 @@ class MetArtChannel:
             if img_bytes:
                 if target_size:
                     img_bytes = self._resize(img_bytes, target_size, self.settings.fit_mode)
+                if self.settings.overlay_enabled:
+                    img_bytes = self._apply_overlay(img_bytes, chosen)
                 self._last_shown[cache_key] = chosen  # keep details in sync
                 self.last_error = None
                 return {
@@ -386,7 +527,9 @@ class MetArtChannel:
                     "title": chosen.get("title", ""),
                     "artist": chosen.get("artist", ""),
                     "date": chosen.get("date", ""),
+                    "medium": chosen.get("medium", ""),
                     "department": chosen.get("department", ""),
+                    "culture": chosen.get("culture", ""),
                     "object_id": chosen["object_id"],
                     "object_url": chosen.get("object_url", ""),
                     "gallery": gallery_id,
@@ -437,10 +580,16 @@ class MetArtChannel:
             allowed = {
                 "fit_mode", "image_quality", "cache_max_per_gallery",
                 "refresh_interval_hours", "galleries",
+                "overlay_enabled", "overlay_position", "overlay_fields",
+                "include_metadata_in_response",
             }
             for k in allowed:
                 if k in body:
                     setattr(self.settings, k, body[k])
+            # setattr bypasses dataclass __post_init__ validation — re-run it
+            # explicitly so a bad overlay_position/overlay_fields from a raw
+            # API call can't get persisted.
+            self.settings.__post_init__()
             self._save_settings()
             return JSONResponse({"success": True, "settings": self.settings.to_dict()})
 
@@ -606,13 +755,27 @@ class MetArtChannel:
             if not img_bytes:
                 raise HTTPException(500, "No image bytes produced")
             fingerprint = hashlib.sha256(img_bytes).hexdigest()[:32]
+            headers = {
+                "X-Content-Fingerprint": fingerprint,
+                "Cache-Control": "no-store",
+            }
+            if self.settings.include_metadata_in_response:
+                meta = {
+                    k: result[k]
+                    for k in ("title", "artist", "date", "medium", "department", "culture", "object_id", "object_url", "gallery")
+                    if result.get(k)
+                }
+                if meta:
+                    # Headers must be Latin-1-safe and are size-limited by most
+                    # servers/proxies — base64 keeps it compact and ASCII-only
+                    # regardless of accented artist/title characters.
+                    headers["X-Artwork-Metadata"] = base64.urlsafe_b64encode(
+                        json.dumps(meta).encode("utf-8")
+                    ).decode("ascii")
             return Response(
                 content=img_bytes,
                 media_type=result.get("content_type", "image/jpeg"),
-                headers={
-                    "X-Content-Fingerprint": fingerprint,
-                    "Cache-Control": "no-store",
-                },
+                headers=headers,
             )
 
         logger.info("[MetArt] Router registered, %d galleries configured", len(self.settings.galleries))
