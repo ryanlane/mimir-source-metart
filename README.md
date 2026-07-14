@@ -13,6 +13,8 @@ A Mimir source plugin that serves artwork images from [The Metropolitan Museum o
 - **Multiple galleries** — create as many sub-channels as you want, each with different settings
 - **Image quality** — full-resolution original or web-large thumbnail
 - **Fit modes** — letterbox, crop, or stretch to display resolution
+- **Baked-in details overlay** — optionally draw title/artist/date/etc. directly onto the artwork image (any corner/edge), for setups with no paired details display
+- **Metadata response header** — optionally expose the same artwork details as an `X-Artwork-Metadata` header on `/request-image`, for integrations that want them without parsing the image
 
 ## Default Galleries
 
@@ -43,6 +45,21 @@ Three galleries are pre-configured:
 | Image Quality | primary | `primary` = full-resolution, `small` = web-large thumbnail |
 | Max Artworks / Gallery | 200 | How many artwork details to pre-cache per gallery |
 | Refresh Interval | 168h (weekly) | How often to rebuild the artwork cache |
+| Bake Details onto Image | off | Draws a details panel directly onto the artwork image |
+| Overlay Position | bottom_left | `top_left` / `top_right` / `bottom_left` / `bottom_right` / `top_center` / `bottom_center` |
+| Overlay Fields | title, artist | Any of: `title`, `artist`, `date`, `medium`, `department`, `culture` — the same fields the paired "details" display already uses |
+| Include Metadata in Response Header | off | Attaches title/artist/date/etc. as a base64-encoded JSON `X-Artwork-Metadata` header on `/request-image` |
+
+### About the metadata header
+
+`X-Artwork-Metadata` is set at the plugin's HTTP boundary — it's available to
+anything that calls `/request-image` directly. **It does not currently reach
+the MQTT message a display client receives**: Mimir's core render pipeline
+(`scene_refresh_service` → the MQTT publisher) only forwards image bytes and a
+content fingerprint today, for every channel, not just this one. Wiring artwork
+metadata into the actual outbound MQTT payload is a separate, larger change to
+the server's shared render/publish path — this header is the plugin-side half
+of that, ready for the day that wiring exists.
 
 ## API
 
