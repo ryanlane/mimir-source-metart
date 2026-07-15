@@ -531,6 +531,144 @@ class TestOverlay:
 
 
 # ---------------------------------------------------------------------------
+# Text wrapping — replaces the old single-line ellipsis truncation so every
+# field displays in full, never cut off.
+# ---------------------------------------------------------------------------
+
+class TestWrapToWidth:
+    @staticmethod
+    def _draw():
+        from PIL import Image as PilImage, ImageDraw as PilImageDraw
+        img = PilImage.new("RGB", (10, 10))
+        return PilImageDraw.Draw(img)
+
+    def _font(self, size=20):
+        from channels.met_art.channel import _load_font
+        return _load_font(size)
+
+    def test_short_text_fits_on_one_line(self, channel):
+        draw = self._draw()
+        lines = channel._wrap_to_width(draw, "Short title", self._font(), max_width=1000)
+        assert lines == ["Short title"]
+
+    def test_empty_text_returns_empty_list(self, channel):
+        draw = self._draw()
+        assert channel._wrap_to_width(draw, "", self._font(), max_width=1000) == []
+
+    def test_long_text_wraps_to_multiple_lines(self, channel):
+        draw = self._draw()
+        font = self._font(28)
+        text = "A Very Long Museum Object Title That Cannot Possibly Fit On One Line"
+        lines = channel._wrap_to_width(draw, text, font, max_width=200)
+        assert len(lines) > 1
+        for line in lines:
+            assert draw.textlength(line, font=font) <= 200
+
+    def test_wrapping_preserves_every_word_no_information_lost(self, channel):
+        """The whole point: unlike the old ellipsis truncation, nothing is
+        dropped — rejoining the wrapped lines reconstructs the input exactly."""
+        draw = self._draw()
+        font = self._font(28)
+        text = "Terracotta fragment of a kylix attributed to the Kleophrades Painter"
+        lines = channel._wrap_to_width(draw, text, font, max_width=180)
+        assert len(lines) > 1
+        assert " ".join(lines) == text
+
+    def test_single_unbreakable_word_force_breaks_by_character(self, channel):
+        draw = self._draw()
+        font = self._font(28)
+        text = "Supercalifragilisticexpialidocioussupercalifragilistic"
+        lines = channel._wrap_to_width(draw, text, font, max_width=100)
+        assert len(lines) > 1
+        assert "".join(lines) == text  # character-split — no spaces to rejoin
+        for line in lines:
+            assert draw.textlength(line, font=font) <= 100
+
+    def test_zero_max_width_returns_text_unwrapped(self, channel):
+        draw = self._draw()
+        assert channel._wrap_to_width(draw, "Some title", self._font(), max_width=0) == ["Some title"]
+
+
+# ---------------------------------------------------------------------------
+# Font family + relative size
+# ---------------------------------------------------------------------------
+
+class TestFontFamilyAndScale:
+    def test_each_family_loads_a_distinct_real_font(self, channel):
+        from channels.met_art.channel import _load_font
+        sans = _load_font(24, family="sans")
+        serif = _load_font(24, family="serif")
+        mono = _load_font(24, family="mono")
+        assert "Sans" in sans.getname()[0]
+        assert "Serif" in serif.getname()[0]
+        assert "Mono" in mono.getname()[0]
+
+    def test_bold_variant_differs_from_regular(self, channel):
+        from channels.met_art.channel import _load_font
+        regular = _load_font(24, bold=False, family="serif")
+        bold = _load_font(24, bold=True, family="serif")
+        assert regular.getname() != bold.getname()
+
+    def test_unknown_family_falls_back_to_sans(self, channel):
+        from channels.met_art.channel import _load_font
+        font = _load_font(24, family="not-a-real-family")
+        assert "Sans" in font.getname()[0]
+
+    def test_font_scale_factors_are_ordered(self):
+        from channels.met_art.channel import FONT_SCALE_FACTORS
+        assert (
+            FONT_SCALE_FACTORS["small"]
+            < FONT_SCALE_FACTORS["medium"]
+            < FONT_SCALE_FACTORS["large"]
+            < FONT_SCALE_FACTORS["x_large"]
+        )
+
+    def test_larger_scale_requests_larger_font_sizes(self, channel, monkeypatch):
+        """_apply_overlay must actually thread overlay_font_scale into the
+        pixel sizes it asks _load_font for — not just accept the setting."""
+        requested_sizes = []
+
+        def spy_load_font(size, bold=False, family="sans"):
+            requested_sizes.append(size)
+            from channels.met_art.channel import _load_font as real_load_font
+            return real_load_font(size, bold=bold, family=family)
+
+        monkeypatch.setattr("channels.met_art.channel._load_font", spy_load_font)
+
+        original = _make_real_jpeg(800, 600)
+        artwork = make_artwork(1, "Test Title")
+
+        channel.settings.overlay_fields = ["title"]
+        channel.settings.overlay_font_scale = "small"
+        channel._apply_overlay(original, artwork)
+        small_sizes = list(requested_sizes)
+
+        requested_sizes.clear()
+        channel.settings.overlay_font_scale = "x_large"
+        channel._apply_overlay(original, artwork)
+        large_sizes = list(requested_sizes)
+
+        assert max(large_sizes) > max(small_sizes)
+
+    def test_font_family_setting_used_by_apply_overlay(self, channel, monkeypatch):
+        requested_families = []
+
+        def spy_load_font(size, bold=False, family="sans"):
+            requested_families.append(family)
+            from channels.met_art.channel import _load_font as real_load_font
+            return real_load_font(size, bold=bold, family=family)
+
+        monkeypatch.setattr("channels.met_art.channel._load_font", spy_load_font)
+
+        original = _make_real_jpeg(800, 600)
+        channel.settings.overlay_fields = ["title"]
+        channel.settings.overlay_font_family = "mono"
+        channel._apply_overlay(original, make_artwork(1, "Test Title"))
+
+        assert requested_families and all(f == "mono" for f in requested_families)
+
+
+# ---------------------------------------------------------------------------
 # X-Artwork-Metadata response header
 # ---------------------------------------------------------------------------
 

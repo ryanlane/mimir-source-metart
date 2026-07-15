@@ -48,18 +48,22 @@ Three galleries are pre-configured:
 | Bake Details onto Image | off | Draws a details panel directly onto the artwork image |
 | Overlay Position | bottom_left | `top_left` / `top_right` / `bottom_left` / `bottom_right` / `top_center` / `bottom_center` |
 | Overlay Fields | title, artist | Any of: `title`, `artist`, `date`, `medium`, `department`, `culture` — the same fields the paired "details" display already uses |
-| Include Metadata in Response Header | off | Attaches title/artist/date/etc. as a base64-encoded JSON `X-Artwork-Metadata` header on `/request-image` |
+| Overlay Text Size | medium | `small` / `medium` / `large` / `x_large` — relative size of the baked-in overlay text |
+| Overlay Font | sans | `sans` / `serif` / `mono` — typeface for the baked-in overlay text |
+| Include Metadata in Response Header | off | Attaches title/artist/date/etc. as a base64-encoded JSON `X-Artwork-Metadata` header on `/request-image`, and (when the field is present) as the `metadata` object on the display client's MQTT `display_image` command |
+
+The baked-in overlay always wraps text to fit the panel width — every configured
+field is shown in full across as many lines as it needs, never truncated or
+cut off with an ellipsis.
 
 ### About the metadata header
 
-`X-Artwork-Metadata` is set at the plugin's HTTP boundary — it's available to
-anything that calls `/request-image` directly. **It does not currently reach
-the MQTT message a display client receives**: Mimir's core render pipeline
-(`scene_refresh_service` → the MQTT publisher) only forwards image bytes and a
-content fingerprint today, for every channel, not just this one. Wiring artwork
-metadata into the actual outbound MQTT payload is a separate, larger change to
-the server's shared render/publish path — this header is the plugin-side half
-of that, ready for the day that wiring exists.
+`X-Artwork-Metadata` is set at the plugin's HTTP boundary and read by Mimir's
+core render pipeline (`scene_refresh_service` → the MQTT publisher), which
+forwards it as the `metadata` field on the `display_image` MQTT command sent
+to display clients. Electron and Windows native displays render it as a
+client-side overlay in addition to (or instead of) this plugin's baked-in
+image overlay.
 
 ## API
 

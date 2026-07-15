@@ -27,6 +27,20 @@ const OVERLAY_POSITIONS = [
   { id: 'bottom_right',   label: 'Bottom right' },
 ];
 
+// Kept in sync with OVERLAY_FONT_SCALES / OVERLAY_FONT_FAMILIES in models.py.
+const OVERLAY_FONT_SCALES = [
+  { id: 'small',   label: 'Small' },
+  { id: 'medium',  label: 'Medium' },
+  { id: 'large',   label: 'Large' },
+  { id: 'x_large', label: 'Extra Large' },
+];
+
+const OVERLAY_FONT_FAMILIES = [
+  { id: 'sans',   label: 'Sans-serif' },
+  { id: 'serif',  label: 'Serif' },
+  { id: 'mono',   label: 'Monospace' },
+];
+
 const CSS = `
   :host {
     display: block;
@@ -429,6 +443,8 @@ class MetArtManager extends HTMLElement {
       overlay_enabled: !!root.querySelector('#setting-overlay-enabled')?.checked,
       overlay_position: root.querySelector('#setting-overlay-position')?.value || 'bottom_left',
       overlay_fields: overlayFields,
+      overlay_font_scale: root.querySelector('#setting-overlay-font-scale')?.value || 'medium',
+      overlay_font_family: root.querySelector('#setting-overlay-font-family')?.value || 'sans',
       include_metadata_in_response: !!root.querySelector('#setting-include-metadata')?.checked,
     };
     this.setState({ saving: true, message: null });
@@ -661,6 +677,18 @@ class MetArtManager extends HTMLElement {
             <label for="setting-overlay-position">Overlay Position</label>
             <select id="setting-overlay-position">
               ${OVERLAY_POSITIONS.map(p => `<option value="${p.id}" ${(s.overlay_position || 'bottom_left') === p.id ? 'selected' : ''}>${p.label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="setting-overlay-font-scale">Text Size</label>
+            <select id="setting-overlay-font-scale">
+              ${OVERLAY_FONT_SCALES.map(f => `<option value="${f.id}" ${(s.overlay_font_scale || 'medium') === f.id ? 'selected' : ''}>${f.label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="setting-overlay-font-family">Font</label>
+            <select id="setting-overlay-font-family">
+              ${OVERLAY_FONT_FAMILIES.map(f => `<option value="${f.id}" ${(s.overlay_font_family || 'sans') === f.id ? 'selected' : ''}>${f.label}</option>`).join('')}
             </select>
           </div>
           <div class="field field-label">

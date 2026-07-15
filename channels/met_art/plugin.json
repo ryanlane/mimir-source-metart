@@ -2,7 +2,7 @@
   "id": "com.metmuseum.art",
   "name": "Met Museum Art",
   "description": "Displays artworks from The Metropolitan Museum of Art's open collection. Browse by department, keyword search, or highlights gallery. No API key required.",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "type": "embedded",
   "entry_point": "channel.py",
   "class_name": "MetArtChannel",
@@ -49,6 +49,8 @@
       "overlay_enabled": false,
       "overlay_position": "bottom_left",
       "overlay_fields": ["title", "artist"],
+      "overlay_font_scale": "medium",
+      "overlay_font_family": "sans",
       "include_metadata_in_response": false
     },
     "schema": {
@@ -110,8 +112,22 @@
             "enum": ["title", "artist", "date", "medium", "department", "culture"]
           },
           "title": "Overlay Fields",
-          "description": "Which artwork details to include in the baked-in overlay (same fields the paired details display uses)",
+          "description": "Which artwork details to include in the baked-in overlay (same fields the paired details display uses). Text wraps to as many lines as needed — nothing is truncated.",
           "default": ["title", "artist"]
+        },
+        "overlay_font_scale": {
+          "type": "string",
+          "enum": ["small", "medium", "large", "x_large"],
+          "title": "Overlay Text Size",
+          "description": "Relative size of the baked-in overlay text",
+          "default": "medium"
+        },
+        "overlay_font_family": {
+          "type": "string",
+          "enum": ["sans", "serif", "mono"],
+          "title": "Overlay Font",
+          "description": "Typeface for the baked-in overlay text",
+          "default": "sans"
         },
         "include_metadata_in_response": {
           "type": "boolean",

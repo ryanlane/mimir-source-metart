@@ -59,6 +59,30 @@ class TestSettings:
         assert s2.overlay_position == "top_right"
         assert s2.overlay_fields == ["date", "medium"]
 
+    def test_overlay_font_defaults(self):
+        s = Settings()
+        assert s.overlay_font_scale == "medium"
+        assert s.overlay_font_family == "sans"
+
+    def test_invalid_overlay_font_scale_falls_back(self):
+        s = Settings(overlay_font_scale="gigantic")
+        assert s.overlay_font_scale == "medium"
+
+    def test_invalid_overlay_font_family_falls_back(self):
+        s = Settings(overlay_font_family="comic-sans")
+        assert s.overlay_font_family == "sans"
+
+    def test_valid_overlay_font_scale_and_family_accepted(self):
+        s = Settings(overlay_font_scale="x_large", overlay_font_family="mono")
+        assert s.overlay_font_scale == "x_large"
+        assert s.overlay_font_family == "mono"
+
+    def test_overlay_font_settings_roundtrip(self):
+        s = Settings(overlay_font_scale="large", overlay_font_family="serif")
+        s2 = Settings.from_dict(s.to_dict())
+        assert s2.overlay_font_scale == "large"
+        assert s2.overlay_font_family == "serif"
+
 
 class TestArtworkCache:
     @pytest.fixture

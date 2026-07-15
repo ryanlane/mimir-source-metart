@@ -61,6 +61,14 @@ OVERLAY_POSITIONS = (
 OVERLAY_FIELDS_AVAILABLE = ("title", "artist", "date", "medium", "department", "culture")
 _DEFAULT_OVERLAY_FIELDS = ["title", "artist"]
 
+# Multiplier applied on top of the existing image-proportional font sizing.
+OVERLAY_FONT_SCALES = ("small", "medium", "large", "x_large")
+# Font families, each backed by a real TTF confirmed present in the mimir-api
+# image (Playwright's Chromium dependencies pull in DejaVu/Liberation/FreeFont
+# regardless of any explicit `fonts-*` apt install) — see channel.py's
+# _FONT_FAMILY_PATHS for the actual file paths per family.
+OVERLAY_FONT_FAMILIES = ("sans", "serif", "mono")
+
 
 @dataclass
 class Settings(SettingsMixin):
@@ -74,6 +82,8 @@ class Settings(SettingsMixin):
     overlay_enabled: bool = False
     overlay_position: str = "bottom_left"
     overlay_fields: List[str] = field(default_factory=lambda: list(_DEFAULT_OVERLAY_FIELDS))
+    overlay_font_scale: str = "medium"
+    overlay_font_family: str = "sans"
     # Attach the same details as an X-Artwork-Metadata response header on
     # /request-image, so callers building the MQTT payload (or any other
     # integration) can read them without parsing the image.
@@ -85,6 +95,10 @@ class Settings(SettingsMixin):
         self.overlay_fields = [f for f in self.overlay_fields if f in OVERLAY_FIELDS_AVAILABLE] or list(
             _DEFAULT_OVERLAY_FIELDS
         )
+        if self.overlay_font_scale not in OVERLAY_FONT_SCALES:
+            self.overlay_font_scale = "medium"
+        if self.overlay_font_family not in OVERLAY_FONT_FAMILIES:
+            self.overlay_font_family = "sans"
 
 
 class ArtworkCache(JsonCache):

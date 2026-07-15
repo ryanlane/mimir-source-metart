@@ -26,6 +26,8 @@ from fastapi.responses import JSONResponse, Response
 from .models import OVERLAY_FIELDS_AVAILABLE, ArtworkCache, Settings, make_gallery_id
 from . import fetcher as _fetcher
 
+FONT_SCALE_FACTORS = {"small": 0.8, "medium": 1.0, "large": 1.3, "x_large": 1.6}
+
 _PLUGIN_DIR = Path(__file__).parent
 logger = logging.getLogger("mimir.channels.metart")
 
@@ -38,24 +40,53 @@ except ImportError:
     _PIL = False
     logger.warning("[MetArt] Pillow not installed — image resizing disabled")
 
-# Same fallback list genart uses — common system TTFs, then Pillow's bitmap
-# default. No shared font-loading utility exists yet in mimir-source-sdk
-# (each renderer-style plugin currently carries its own copy of this).
-_FONT_PATHS = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-)
+# Real TTFs confirmed present in the mimir-api image — Playwright's Chromium
+# dependencies pull in DejaVu/Liberation regardless of any explicit `fonts-*`
+# apt install, so these three families are genuinely available, not just
+# hopeful guesses. Each entry is an ordered fallback list (first match wins).
+# No shared font-loading utility exists yet in mimir-source-sdk (each
+# renderer-style plugin currently carries its own copy of this pattern).
+_FONT_FAMILY_PATHS: Dict[str, Dict[bool, tuple]] = {
+    "sans": {
+        False: (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ),
+        True: (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ),
+    },
+    "serif": {
+        False: (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        ),
+        True: (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+        ),
+    },
+    "mono": {
+        False: (
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        ),
+        True: (
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        ),
+    },
+}
 _font_cache: Dict[tuple, Any] = {}
 
 
-def _load_font(size: int, bold: bool = False):
-    key = (size, bold)
+def _load_font(size: int, bold: bool = False, family: str = "sans"):
+    key = (family, size, bold)
     font = _font_cache.get(key)
     if font is not None:
         return font
-    candidates = [p for p in _FONT_PATHS if ("Bold" in p) == bold]
+    candidates = _FONT_FAMILY_PATHS.get(family, _FONT_FAMILY_PATHS["sans"])[bold]
     for path in candidates:
         try:
             font = _PilImageFont.truetype(path, size)
@@ -195,21 +226,62 @@ class MetArtChannel:
     }
 
     @staticmethod
-    def _truncate_to_width(draw, text: str, font, max_width: int) -> str:
-        if max_width <= 0 or draw.textlength(text, font=font) <= max_width:
-            return text
-        ellipsis = "…"
-        lo, hi = 0, len(text)
-        best = ellipsis
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            candidate = text[:mid].rstrip() + ellipsis
+    def _force_break_word(draw, word: str, font, max_width: int) -> List[str]:
+        """Split a single token wider than max_width into character-level
+        chunks via binary search, so it still fully renders across multiple
+        lines instead of overflowing the panel unbounded."""
+        pieces: List[str] = []
+        remaining = word
+        while draw.textlength(remaining, font=font) > max_width and len(remaining) > 1:
+            lo, hi = 1, len(remaining) - 1
+            best = 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if draw.textlength(remaining[:mid], font=font) <= max_width:
+                    best = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            pieces.append(remaining[:best])
+            remaining = remaining[best:]
+        if remaining:
+            pieces.append(remaining)
+        return pieces
+
+    @staticmethod
+    def _wrap_to_width(draw, text: str, font, max_width: int) -> List[str]:
+        """Greedy word-wrap so the full string always displays — no ellipsis,
+        no cut-off text. A single word wider than max_width on its own
+        (e.g. a long unbroken token) is force-broken by character so it still
+        fully renders instead of overflowing the panel."""
+        if max_width <= 0 or not text:
+            return [text] if text else []
+
+        words = text.split()
+        lines: List[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
             if draw.textlength(candidate, font=font) <= max_width:
-                best = candidate
-                lo = mid + 1
+                current = candidate
+                continue
+            # Candidate doesn't fit — close out the current line (if any)
+            # and start fresh with just this word.
+            if current:
+                lines.append(current)
+            if draw.textlength(word, font=font) <= max_width:
+                current = word
             else:
-                hi = mid - 1
-        return best
+                # The word alone is still too wide — force-break it. Any
+                # already-completed chunks become their own lines; the last
+                # (shortest) chunk becomes the new "current" so subsequent
+                # words can still pack onto it normally.
+                pieces = MetArtChannel._force_break_word(draw, word, font, max_width)
+                lines.extend(pieces[:-1])
+                current = pieces[-1] if pieces else ""
+        if current:
+            lines.append(current)
+        return lines
 
     def _apply_overlay(self, img_bytes: bytes, artwork: Dict[str, Any]) -> bytes:
         if not _PIL:
@@ -223,39 +295,55 @@ class MetArtChannel:
             overlay = _PilImage.new("RGBA", (w, h), (0, 0, 0, 0))
             draw = _PilImageDraw.Draw(overlay)
 
+            scale = FONT_SCALE_FACTORS.get(self.settings.overlay_font_scale, 1.0)
+            family = self.settings.overlay_font_family
+
             margin = max(10, round(min(w, h) * 0.035))
             pad = max(8, round(min(w, h) * 0.022))
             max_text_width = round(w * 0.6) - 2 * pad
 
-            title_font = _load_font(max(16, round(min(w, h) * 0.042)), bold=True)
-            artist_font = _load_font(max(13, round(min(w, h) * 0.026)))
-            meta_font = _load_font(max(11, round(min(w, h) * 0.020)))
+            title_font = _load_font(max(16, round(min(w, h) * 0.042 * scale)), bold=True, family=family)
+            artist_font = _load_font(max(13, round(min(w, h) * 0.026 * scale)), family=family)
+            meta_font = _load_font(max(11, round(min(w, h) * 0.020 * scale)), family=family)
 
-            # (text, font, color, gap-after-in-px)
-            rows: List[tuple] = []
+            # (lines, font, color, gap-after-block-in-px)
+            blocks: List[tuple] = []
             if "title" in fields and artwork.get("title"):
-                text = self._truncate_to_width(draw, str(artwork["title"]), title_font, max_text_width)
-                rows.append((text, title_font, (255, 255, 255, 255), round(pad * 0.5)))
+                lines = self._wrap_to_width(draw, str(artwork["title"]), title_font, max_text_width)
+                blocks.append((lines, title_font, (255, 255, 255, 255), round(pad * 0.5)))
             if "artist" in fields and artwork.get("artist"):
-                text = self._truncate_to_width(draw, str(artwork["artist"]), artist_font, max_text_width)
-                rows.append((text, artist_font, (170, 220, 170, 255), round(pad * 0.9)))
+                lines = self._wrap_to_width(draw, str(artwork["artist"]), artist_font, max_text_width)
+                blocks.append((lines, artist_font, (170, 220, 170, 255), round(pad * 0.9)))
             for key in ("date", "medium", "department", "culture"):
                 if key in fields and artwork.get(key):
                     label = self._OVERLAY_LABELS[key]
-                    value = self._truncate_to_width(draw, str(artwork[key]), meta_font, max_text_width - 70)
-                    rows.append((f"{label.upper()}   {value}", meta_font, (190, 190, 190, 255), round(pad * 0.45)))
+                    lines = self._wrap_to_width(
+                        draw, f"{label.upper()}   {artwork[key]}", meta_font, max_text_width
+                    )
+                    blocks.append((lines, meta_font, (190, 190, 190, 255), round(pad * 0.45)))
 
-            if not rows:
+            if not blocks:
                 return img_bytes
 
-            line_heights = []
+            # Measure panel size across every wrapped line in every block.
+            line_step_by_block = []
             panel_w = 0
-            for text, font, _color, _gap in rows:
-                bbox = draw.textbbox((0, 0), text, font=font)
-                line_heights.append(bbox[3] - bbox[1])
-                panel_w = max(panel_w, bbox[2] - bbox[0])
+            for lines, font, _color, _gap in blocks:
+                max_line_h = 0
+                for line in lines:
+                    bbox = draw.textbbox((0, 0), line, font=font)
+                    max_line_h = max(max_line_h, bbox[3] - bbox[1])
+                    panel_w = max(panel_w, bbox[2] - bbox[0])
+                line_step_by_block.append(round(max_line_h * 1.15))  # 1.15x for line-to-line spacing
             panel_w = min(panel_w + 2 * pad, w - 2 * margin)
-            panel_h = sum(line_heights) + sum(gap for *_, gap in rows) + 2 * pad
+
+            panel_h = 2 * pad
+            for (lines, _f, _c, gap), step in zip(blocks, line_step_by_block):
+                panel_h += len(lines) * step + gap
+            panel_h -= blocks[-1][3]  # no trailing gap after the last block
+            # Pathologically long text (many wrapped lines) should never push
+            # the panel past the image itself.
+            panel_h = min(panel_h, h - 2 * margin)
 
             position = self.settings.overlay_position
             if position == "top_left":
@@ -275,9 +363,11 @@ class MetArtChannel:
             draw.rounded_rectangle([x, y, x + panel_w, y + panel_h], radius=radius, fill=(0, 0, 0, 165))
 
             cursor_y = y + pad
-            for (text, font, color, gap), lh in zip(rows, line_heights):
-                draw.text((x + pad, cursor_y), text, font=font, fill=color)
-                cursor_y += lh + gap
+            for (lines, font, color, gap), step in zip(blocks, line_step_by_block):
+                for line in lines:
+                    draw.text((x + pad, cursor_y), line, font=font, fill=color)
+                    cursor_y += step
+                cursor_y += gap
 
             composited = _PilImage.alpha_composite(base, overlay).convert("RGB")
             buf = io.BytesIO()
@@ -581,6 +671,7 @@ class MetArtChannel:
                 "fit_mode", "image_quality", "cache_max_per_gallery",
                 "refresh_interval_hours", "galleries",
                 "overlay_enabled", "overlay_position", "overlay_fields",
+                "overlay_font_scale", "overlay_font_family",
                 "include_metadata_in_response",
             }
             for k in allowed:
